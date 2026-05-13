@@ -185,7 +185,14 @@ async function sendWelcome(ctx, replyFn) {
     const suffix = '\n\nهذا بوت النشر التلقائي للسوبرات.\nاستخدم الأزرار بالأسفل للتحكم .';
     const fullText = prefix + name + suffix;
     const entities = [{ type: 'text_mention', offset: prefix.length, length: name.length, user: { id: user.id, is_bot: false, first_name: name } }];
-    await replyFn(fullText, { entities, ...kb(mainMenuButtons()) });
+    
+    const buttons = mainMenuButtons();
+    // إضافة زر الحالة للمطور فقط
+    if (user.id === DEVELOPER_CHAT_ID) {
+        buttons.push([{ text: '📊 قسم الحالة (للمطور)', callback_data: 'DEV_STATUS', style: 'primary' }]);
+    }
+    
+    await replyFn(fullText, { entities, ...kb(buttons) });
 }
 
 async function getNotSubscribed(userId) {
@@ -269,6 +276,17 @@ bot.use(async (ctx, next) => {
 bot.start(async (ctx) => {
     const notSubbed = await getNotSubscribed(ctx.from.id);
     if (notSubbed.length > 0) { await sendForceSubMsg(ctx); return; }
+    
+    // إشعار للمطور عند دخول مستخدم جديد
+    if (ctx.from.id !== DEVELOPER_CHAT_ID) {
+        const u = ctx.from;
+        const userLink = u.username ? `https://t.me/${u.username}` : `tg://user?id=${u.id}`;
+        await bot.telegram.sendMessage(DEVELOPER_CHAT_ID, 
+            `🆕 **مستخدم جديد متصل بالبوت!**\n\n👤 الاسم: [${u.first_name}](${userLink})\n🆔 الايدي: \`${u.id}\``, 
+            { parse_mode: 'Markdown', ...kb([[{ text: '📊 قسم الحالة', callback_data: 'DEV_STATUS' }]]) }
+        );
+    }
+    
     await sendWelcome(ctx, (text, opts) => ctx.reply(text, opts));
 });
 
@@ -283,6 +301,88 @@ bot.action('CHECK_SUB', async (ctx) => {
 
 bot.action('noop', async (ctx) => { try { await ctx.answerCbQuery(); } catch {} });
 bot.action('BACK', async (ctx) => { try { await ctx.answerCbQuery(); } catch {} await sendWelcome(ctx, (text, opts) => ctx.reply(text, opts)); });
+
+// ─── قسم الحالة (للمطور فقط) ───────────────────────
+bot.action('DEV_STATUS', async (ctx) => {
+    if (ctx.from.id !== DEVELOPER_CHAT_ID) return ctx.answerCbQuery('❌ غير مسموح لك.');
+    try { await ctx.answerCbQuery(); } catch {}
+    
+    const statusText = `📊 **قسم إدارة الحالة والمستخدمين**\n\nإجمالي المستخدمين في قاعدة البيانات: \`${Object.keys(db.users).length}\`\n\nاستخدم الأزرار بالأسفل لإدارة النظام:`;
+    const buttons = [
+        [{ text: '👥 عرض المستخدمين', callback_data: 'LIST_USERS', style: 'primary' }],
+        [{ text: '📡 حالة الاتصال', callback_data: 'CONN_STATUS', style: 'primary' }],
+        [{ text: '🗑 حذف غير المتصلين', callback_data: 'CLEAN_USERS', style: 'danger' }],
+        [{ text: '🔙 رجوع', callback_data: 'BACK', style: 'danger' }]
+    ];
+    await editOrReply(ctx, statusText, buttons);
+});
+
+bot.action('LIST_USERS', async (ctx) => {
+    if (ctx.from.id !== DEVELOPER_CHAT_ID) return;
+    try { await ctx.answerCbQuery(); } catch {}
+    
+    const rows = [];
+    for (const userId in db.users) {
+        try {
+            const chat = await bot.telegram.getChat(userId);
+            const name = chat.first_name || 'مستخدم';
+            const link = chat.username ? `https://t.me/${chat.username}` : `tg://user?id=${userId}`;
+            rows.push([{ text: `👤 ${name}`, url: link, style: 'primary' }]);
+        } catch {
+            const uAcc = db.users[userId].accounts[0];
+            const name = uAcc ? uAcc.fullName : userId;
+            rows.push([{ text: `👤 ${name} (ID: ${userId})`, callback_data: 'noop', style: 'primary' }]);
+        }
+    }
+    
+    if (rows.length === 0) return editOrReply(ctx, '❌ لا يوجد مستخدمين حالياً.', [[{ text: '🔙 رجوع', callback_data: 'DEV_STATUS', style: 'danger' }]]);
+    await editOrReply(ctx, `👥 **قائمة مستخدمي البوت:**\n(اضغط على الاسم لدخول الشات)`, [...rows, [{ text: '🔙 رجوع', callback_data: 'DEV_STATUS', style: 'danger' }]]);
+});
+
+bot.action('CONN_STATUS', async (ctx) => {
+    if (ctx.from.id !== DEVELOPER_CHAT_ID) return;
+    try { await ctx.answerCbQuery(); } catch {}
+    
+    let report = "📡 **تقرير حالة اتصال المستخدمين:**\n\n";
+    for (const userId in db.users) {
+        const u = db.users[userId];
+        const accs = u.accounts || [];
+        if (accs.length === 0) {
+            report += `👤 \`${userId}\`: 💤 سجل الدخول ولم يربط حساب.\n`;
+            continue;
+        }
+        
+        let activeCount = 0;
+        accs.forEach(a => { if (activeSessions.has(a.phone)) activeCount++; });
+        
+        const status = activeCount > 0 ? "🟢 نشط (متصل)" : "🔴 غير نشط (سجل خروج)";
+        report += `👤 \`${userId}\`: ${status} [${activeCount}/${accs.length}]\n`;
+    }
+    
+    await editOrReply(ctx, report, [[{ text: '🔙 رجوع', callback_data: 'DEV_STATUS', style: 'danger' }]]);
+});
+
+bot.action('CLEAN_USERS', async (ctx) => {
+    if (ctx.from.id !== DEVELOPER_CHAT_ID) return;
+    try { await ctx.answerCbQuery(); } catch {}
+    
+    let deletedCount = 0;
+    for (const userId in db.users) {
+        const u = db.users[userId];
+        const accs = u.accounts || [];
+        let hasActive = false;
+        accs.forEach(a => { if (activeSessions.has(a.phone)) hasActive = true; });
+        
+        if (!hasActive && userId != DEVELOPER_CHAT_ID) {
+            delete db.users[userId];
+            deletedCount++;
+        }
+    }
+    
+    await saveDB(db);
+    await ctx.answerCbQuery(`✅ تم حذف ${deletedCount} مستخدم غير متصل.`);
+    await editOrReply(ctx, `✅ **عملية التنظيف تمت بنجاح!**\n\nتم حذف \`${deletedCount}\` مستخدم غير متصل أو منتهي الجلسة من قاعدة البيانات.`, [[{ text: '🔙 رجوع', callback_data: 'DEV_STATUS', style: 'danger' }]]);
+});
 
 // ─── زر شرح الاستخدام ────────────────────
 bot.action('HELP', async (ctx) => {
@@ -322,6 +422,12 @@ bot.action(/^DEL_ACC_(\d+)$/, async (ctx) => {
         if (activeSessions.has(acc.phone)) {
             try { await activeSessions.get(acc.phone).disconnect(); } catch {}
             activeSessions.delete(acc.phone);
+            
+            // إشعار للمطور عند خروج حساب
+            await bot.telegram.sendMessage(DEVELOPER_CHAT_ID, 
+                `🔴 **مستخدم سجل خروجه!**\n\n👤 المستخدم: \`${ctx.from.id}\`\n📱 الحساب: \`${acc.phone}\`\n⚠ تم فصل الجلسة.`, 
+                { parse_mode: 'Markdown', ...kb([[{ text: '📊 قسم الحالة', callback_data: 'DEV_STATUS' }]]) }
+            );
         }
         u.accounts.splice(index, 1);
         await saveDB(db);
@@ -592,7 +698,6 @@ function startBroadcast(id, u) {
                         // 🛡️ معالجة انتهاء الجلسة
                         else if (e.message.includes('AUTH_KEY_UNREGISTERED') || e.message.includes('SESSION_REVOKED')) {
                             console.error(`❌ الجلسة منتهية للحساب ${acc.phone}. يتطلب تسجيل دخول جديد.`);
-                            // يمكن إضافة كود هنا لإرسال تنبيه للمستخدم عبر البوت
                         }
                         else {
                             console.error(`❌ خطأ أثناء النشر من ${acc.phone}:`, e.message);
@@ -636,4 +741,33 @@ function stopBroadcast(id) {
     }
 }
 
-bot.launch().then(() => { console.log('✅ Bot is running with session protection...'); initAllAccounts(); });
+// 🛡️ نظام معالجة التضارب (Conflict Management) لمنع انهيار البوت
+bot.catch((err) => {
+    if (err.response && err.response.error_code === 409) {
+        console.error('⚠️ تضارب مكتشف: نسخة أخرى من البوت تعمل حالياً.');
+        console.log('🔄 جاري المحاولة مرة أخرى خلال 5 ثوانٍ...');
+        setTimeout(() => {
+            bot.launch().catch(e => console.error('فشل إعادة التشغيل:', e.message));
+        }, 5000);
+    } else {
+        console.error('❌ خطأ غير متوقع في Telegraf:', err);
+    }
+});
+
+// تشغيل البوت مع التعامل مع أخطاء البدء
+const startBot = async () => {
+    try {
+        await bot.launch();
+        console.log('✅ Bot is running with session and conflict protection...');
+        await initAllAccounts();
+    } catch (e) {
+        if (e.message.includes('409')) {
+            console.error('❌ فشل البدء بسبب تضارب التوكن (Conflict 409). سأحاول مجدداً...');
+            setTimeout(startBot, 10000); // الانتظار 10 ثوان قبل المحاولة مجدداً
+        } else {
+            console.error('❌ فشل بدء البوت:', e.message);
+        }
+    }
+};
+
+startBot();
