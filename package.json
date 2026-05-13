@@ -1,0 +1,17 @@
+{
+  "name": "telegram-auto-post-bot",
+  "version": "1.0.0",
+  "description": "Telegram Auto Posting Userbot with Colored Buttons",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.26.4",
+    "fs-extra": "^11.3.0",
+    "input": "^1.0.1",
+    "telegraf": "^4.16.3",
+    "telegram": "^2.26.22"
+  }
+}
