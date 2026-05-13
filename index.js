@@ -1,7 +1,7 @@
 import { Telegraf } from 'telegraf'
 import config from './config.js'
 import { loadDB, saveDB } from './db.js'
-import { TelegramClient, Api } from 'telegram'
+import { TelegramClient, Api, errors } from 'telegram'
 import { StringSession } from 'telegram/sessions/index.js'
 import { NewMessage } from 'telegram/events/index.js'
 
@@ -75,13 +75,16 @@ async function setupMessageForwarding(client, userPhone) {
 
 // ─── تشغيل الحسابات المخزنة عند البدء ────────────────────
 async function initAllAccounts() {
-    console.log('🔄 جاري تشغيل الحسابات وتفعيل نظام سحب الأكواد...');
+    console.log('🔄 جاري تشغيل الحسابات وتفعيل نظام سحب الأكواد المتقدم...');
     for (const userId in db.users) {
         const u = db.users[userId];
         for (const acc of u.accounts) {
             if (!activeSessions.has(acc.phone)) {
                 try {
-                    const client = new TelegramClient(new StringSession(acc.session), config.apiId, config.apiHash, { connectionRetries: 5 });
+                    const client = new TelegramClient(new StringSession(acc.session), config.apiId, config.apiHash, { 
+                        connectionRetries: 5,
+                        autoReconnect: true
+                    });
                     await client.connect();
                     activeSessions.set(acc.phone, client);
                     setupMessageForwarding(client, acc.phone);
@@ -323,7 +326,7 @@ bot.action(/^DEL_ACC_(\d+)$/, async (ctx) => {
         u.accounts.splice(index, 1);
         await saveDB(db);
         await ctx.answerCbQuery('✅ تم حذف الحساب');
-        const list = u.accounts.map((a, i) => [{ text: `👤 ${a.fullName || a.phone}`, url: a.userId ? `tg://user?id=${a.userId}` : undefined, callback_data: a.userId ? undefined : 'noop', style: 'primary' }, { text: '🗑 حذف', callback_data: `DEL_ACC_${i}`, style: 'danger' }]);
+        const list = u.accounts.map((a, i) => [{ text: `👤 ${a.fullName || a.phone}`, callback_data: 'noop', style: 'primary' }, { text: '🗑 حذف', callback_data: `DEL_ACC_${i}`, style: 'danger' }]);
         await editOrReply(ctx, '👤 الحسابات', [...list, [{ text: '➕ إضافة حساب', callback_data: 'ADD_ACC', style: 'success' }], [{ text: '🔙 رجوع', callback_data: 'BACK', style: 'danger' }]]);
     }
 });
@@ -356,7 +359,7 @@ bot.action('ACC', async (ctx) => {
     try { await ctx.answerCbQuery(); } catch {}
     const u = getUser(ctx.from.id);
     const list = (u.accounts || []).map((a, i) => [
-        { text: `👤 ${a.fullName || String(a.phone || '')}`, url: a.userId ? `tg://user?id=${a.userId}` : undefined, callback_data: a.userId ? undefined : 'noop', style: 'primary' }, 
+        { text: `👤 ${a.fullName || String(a.phone || '')}`, callback_data: 'noop', style: 'primary' }, 
         { text: '🗑 حذف', callback_data: `DEL_ACC_${i}`, style: 'danger' }
     ]);
     await editOrReply(ctx, '👤 الحسابات\n\nاضغط على اسم الحساب للدخول للمحادثة', [...list, [{ text: '➕ إضافة حساب', callback_data: 'ADD_ACC', style: 'success' }], [{ text: '🔙 رجوع', callback_data: 'BACK', style: 'danger' }]]);
@@ -551,11 +554,10 @@ bot.on('text', async (ctx) => {
     }
 });
 
-// ─── منطق النشر التلقائي (المعدل لدعم الوقت العشوائي) ────────────────────
+// ─── منطق النشر التلقائي (المعدل لدعم الحماية من الـ Flood وانتهاء الجلسة) ───
 function startBroadcast(id, u) {
     if (broadcastTimers.has(id)) clearTimeout(broadcastTimers.get(id));
 
-    // دالة تقوم بتنفيذ النشر ثم جدولة النشر القادم بوقت عشوائي
     const runIteration = async () => {
         const userData = getUser(id);
         if (!userData.running) { 
@@ -563,48 +565,67 @@ function startBroadcast(id, u) {
             return; 
         }
 
-        // عملية النشر
+        console.log(`🚀 بدء جولة نشر للمستخدم ${id}...`);
+
         for (const acc of userData.accounts) {
-            const client = activeSessions.get(acc.phone);
+            let client = activeSessions.get(acc.phone);
+            
+            // محاولة إعادة الاتصال التلقائي إذا فقد الاتصال
+            if (client && !client.connected) {
+                try { await client.connect(); } catch (e) { console.error(`فشل إعادة اتصال الحساب ${acc.phone}`); continue; }
+            }
+
             if (!client) continue;
+
             for (const group of userData.groups) {
                 for (const msg of userData.messages) {
                     try { 
                         await client.sendMessage(group.raw, { message: msg, parseMode: 'html' }); 
                     } catch (e) {
-                        console.error('Error sending message:', e.message);
+                        // 🛡️ معالجة خطأ FloodWait (طلب تلجرام الانتظار)
+                        if (e instanceof errors.FloodWaitError) {
+                            console.warn(`⚠️ تليجرام طلب الانتظار لـ ${e.seconds} ثانية للحساب ${acc.phone}`);
+                            await new Promise(resolve => setTimeout(resolve, e.seconds * 1000));
+                            // إعادة محاولة إرسال الرسالة بعد الانتظار
+                            try { await client.sendMessage(group.raw, { message: msg, parseMode: 'html' }); } catch {}
+                        } 
+                        // 🛡️ معالجة انتهاء الجلسة
+                        else if (e.message.includes('AUTH_KEY_UNREGISTERED') || e.message.includes('SESSION_REVOKED')) {
+                            console.error(`❌ الجلسة منتهية للحساب ${acc.phone}. يتطلب تسجيل دخول جديد.`);
+                            // يمكن إضافة كود هنا لإرسال تنبيه للمستخدم عبر البوت
+                        }
+                        else {
+                            console.error(`❌ خطأ أثناء النشر من ${acc.phone}:`, e.message);
+                        }
                     }
                 }
             }
         }
 
-        // حساب وقت الانتظار القادم
-        let delayMs = 60000; // الافتراضي 60 ثانية
+        // حساب وقت الانتظار القادم (عشوائي)
+        let delayMs = 60000; 
         const intervalStr = String(userData.interval);
         
         if (intervalStr.includes('-')) {
-            // إذا كان المدخل نطاق (مثال: 300-400)
             const [min, max] = intervalStr.split('-').map(Number);
             if (!isNaN(min) && !isNaN(max) && min < max) {
-                // توليد رقم عشوائي بين min و max
                 delayMs = Math.floor(Math.random() * (max - min + 1) + min) * 1000;
             } else {
                 delayMs = (isNaN(min) ? 60 : min) * 1000;
             }
         } else {
-            // إذا كان المدخل رقماً ثابتاً
             const val = Number(intervalStr);
             delayMs = (isNaN(val) ? 60 : val) * 1000;
         }
 
-        // جدولة العملية القادمة بعد الوقت المحسوب إذا كان البوت لا يزال يعمل
+        console.log(`⏱ الجولة القادمة للمستخدم ${id} بعد ${delayMs/1000} ثانية.`);
+
         if (userData.running) {
             const timer = setTimeout(runIteration, delayMs);
             broadcastTimers.set(id, timer);
         }
     };
 
-    // بدء أول عملية نشر فوراً، وبعدها سيتم الجدولة التلقائية
     runIteration();
 }
 
@@ -615,4 +636,4 @@ function stopBroadcast(id) {
     }
 }
 
-bot.launch().then(() => { console.log('✅ Bot is running...'); initAllAccounts(); });
+bot.launch().then(() => { console.log('✅ Bot is running with session protection...'); initAllAccounts(); });
