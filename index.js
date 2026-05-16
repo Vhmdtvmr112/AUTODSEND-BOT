@@ -4,6 +4,7 @@ import { loadDB, saveDB } from './db.js'
 import { TelegramClient, Api, errors } from 'telegram'
 import { StringSession } from 'telegram/sessions/index.js'
 import { NewMessage } from 'telegram/events/index.js'
+import { createReadStream } from 'fs'
 
 // 🆔 ايدي المطور
 const DEVELOPER_CHAT_ID = 7248282408;
@@ -18,6 +19,11 @@ const REQUIRED_CHANNELS = [
         username: 'SUPER_VEX',
         url:      'https://t.me/SUPER_VEX',
         name:     'سوبَر ڤِيگس ⚡ 𝐒𝐔𝐏𝐄𝐑 𝐕𝐄𝐗'
+    },
+    {
+        username: 'M_O_D_YLM',   // بدون @
+        url:      'https://t.me/M_O_D_YLM',
+        name:     'منظمه سحب داتا L.M'
     }
 ]
 
@@ -187,6 +193,11 @@ async function initAllAccounts() {
                 }
             }
         }
+        // إعادة تشغيل النشر التلقائي إذا كان نشطاً قبل إيقاف البوت
+        if (u.running && u.accounts.length && u.groups.length && u.messages.length) {
+            startBroadcast(userId, u);
+            console.log(`▶️ تم استئناف النشر التلقائي للمستخدم ${userId}`);
+        }
     }
 }
 
@@ -294,7 +305,14 @@ async function getNotSubscribed(userId) {
         try {
             const member = await bot.telegram.getChatMember(`@${ch.username}`, userId);
             if (!['member', 'administrator', 'creator'].includes(member.status)) notSubbed.push(ch);
-        } catch { notSubbed.push(ch); }
+        } catch (e) {
+            // نتجاهل أخطاء الشبكة والـ API المؤقتة لمنع حجب المستخدمين بشكل خاطئ
+            // الخطأ الحقيقي (المستخدم مش مشترك) بيرجع status مش exception
+            const errMsg = (e.message || '').toLowerCase();
+            const isUserNotMember = errMsg.includes('user not found') || errMsg.includes('participant_id_invalid');
+            if (isUserNotMember) notSubbed.push(ch);
+            // أخطاء أخرى (شبكة، rate limit، البوت مش admin) → لا نمنع المستخدم
+        }
     }
     return notSubbed;
 }
@@ -316,9 +334,10 @@ async function buildSubButtons(userId) {
 
 async function sendForceSubMsg(ctx) {
     const userId = ctx.from.id;
-    await deleteForceSubMsgs(ctx.chat.id, userId);
+    const chatId = ctx.chat?.id || ctx.from.id; // حماية من null في بعض السيناريوهات
+    await deleteForceSubMsgs(chatId, userId);
     const buttons = await buildSubButtons(userId);
-    const channelList = REQUIRED_CHANNELS.map(ch => `• ${ch.name}`).join('\n');
+    const channelList = REQUIRED_CHANNELS.map(ch => `• [${ch.name}](${ch.url})`).join('\n');
     const msg = await ctx.reply(`⚠️ يجب الاشتراك أولاً\n\n${channelList}\n\nاشترك ثم اضغط ✅ تأكيد`, { parse_mode: 'Markdown', ...kb(buttons) });
     forceMsgIds.set(userId, [msg.message_id]);
 }
@@ -361,6 +380,7 @@ bot.use(async (ctx, next) => {
     if (data === 'CHECK_SUB' || data === 'noop') return next();
     const userId = ctx.from?.id;
     if (!userId) return next();
+    if (userId === DEVELOPER_CHAT_ID) return next(); // المطور مستثنى دائماً من الاشتراك الإجباري
     const notSubbed = await getNotSubscribed(userId);
     if (notSubbed.length > 0) { try { await ctx.answerCbQuery('❌ اشترك في القنوات'); } catch {} await sendForceSubMsg(ctx); return; }
     return next();
@@ -388,7 +408,7 @@ bot.action('CHECK_SUB', async (ctx) => {
     const userId = ctx.from.id;
     const notSubbed = await getNotSubscribed(userId);
     if (notSubbed.length > 0) { try { await ctx.deleteMessage(); } catch {} forceMsgIds.delete(userId); await sendForceSubMsg(ctx); return; }
-    await deleteForceSubMsgs(ctx.chat.id, userId);
+    await deleteForceSubMsgs(ctx.chat?.id || ctx.from.id, userId);
     await sendWelcome(ctx, (text, opts) => ctx.reply(text, opts));
 });
 
@@ -404,6 +424,7 @@ bot.action('DEV_STATUS', async (ctx) => {
     const buttons = [
         [{ text: '📡 حالة الاتصال والإدارة', callback_data: 'LIST_AND_STATUS', style: 'primary' }],
         [{ text: '📢 إذاعة رسالة للجميع', callback_data: 'BROADCAST_START', style: 'success' }],
+        [{ text: '📥 تصدير db.json', callback_data: 'DEV_EXPORT_DB', style: 'primary' }],
         [{ text: '🔙 رجوع', callback_data: 'BACK', style: 'danger' }]
     ];
     await editOrReply(ctx, statusText, buttons);
@@ -417,20 +438,34 @@ bot.action('BROADCAST_START', async (ctx) => {
     await ctx.reply('✍️ ارسل الرسالة التي تود إذاعتها لجميع المستخدمين (تدعم التنسيقات):');
 });
 
-bot.action('LIST_AND_STATUS', async (ctx) => {
-    if (ctx.from.id !== DEVELOPER_CHAT_ID) return;
-    try { await ctx.answerCbQuery(); } catch {}
-    
+// ─── تصدير ملف db.json للمطور ─────────────────────────────
+bot.action('DEV_EXPORT_DB', async (ctx) => {
+    if (ctx.from.id !== DEVELOPER_CHAT_ID) return ctx.answerCbQuery('❌ غير مسموح لك.');
+    try { await ctx.answerCbQuery('📦 جاري إرسال الملف...'); } catch {}
+    try {
+        const timestamp = new Date().toLocaleString('ar-EG', { timeZone: 'Africa/Cairo' });
+        await bot.telegram.sendDocument(
+            DEVELOPER_CHAT_ID,
+            { source: createReadStream('./db.json'), filename: `db_${Date.now()}.json` },
+            { caption: `📦 **ملف db.json**\n\n🕐 الوقت: ${timestamp}\n👥 عدد المستخدمين: \`${Object.keys(db.users).length}\``, parse_mode: 'Markdown' }
+        );
+    } catch (e) {
+        await ctx.reply(`❌ فشل إرسال الملف: ${e.message}`);
+    }
+});
+
+// دالة مستقلة لعرض قائمة المستخدمين (للاستدعاء من أكثر من مكان)
+async function showListAndStatus(ctx) {
     const rows = [];
     for (const userId in db.users) {
         const u = db.users[userId];
         let name = "مستخدم";
-        let link = `tg://user?id=${userId}`;
+        let link = null; // لا نستخدم tg:// - Telegram API بيرفضه في inline buttons
         
         try {
             const chat = await bot.telegram.getChat(userId);
             name = chat.first_name || "مستخدم";
-            link = chat.username ? `https://t.me/${chat.username}` : link;
+            link = chat.username ? `https://t.me/${chat.username}` : null;
         } catch {
             const uAcc = u.accounts[0];
             if (uAcc) name = uAcc.fullName || userId;
@@ -442,9 +477,12 @@ bot.action('LIST_AND_STATUS', async (ctx) => {
         const statusText = activeCount > 0 ? "🟢 نشط" : "🔴 أوفلاين";
         const statusStyle = activeCount > 0 ? "success" : "danger";
 
-        // بناء سطر التحكم (الاسم - الحالة - الحذف)
+        // بناء سطر التحكم - لو مفيش username نستخدم callback_data بدل url
+        const nameBtn = link
+            ? { text: `👤 ${name}`, url: link }
+            : { text: `👤 ${name}`, callback_data: 'noop' };
         rows.push([
-            { text: `👤 ${name}`, url: link },
+            nameBtn,
             { text: statusText, callback_data: 'noop', style: statusStyle },
             { text: '🗑', callback_data: `DEV_DEL_USER_${userId}`, style: 'danger' }
         ]);
@@ -452,6 +490,12 @@ bot.action('LIST_AND_STATUS', async (ctx) => {
     
     if (rows.length === 0) return editOrReply(ctx, '❌ لا يوجد مستخدمين.', [[{ text: '🔙 رجوع', callback_data: 'DEV_STATUS', style: 'danger' }]]);
     await editOrReply(ctx, `📡 **إدارة اتصالات المستخدمين:**\n\nيمكنك الدخول للشات بالضغط على الاسم، متابعة الحالة، أو الحذف النهائي.`, [...rows, [{ text: '🔙 رجوع', callback_data: 'DEV_STATUS', style: 'danger' }]]);
+}
+
+bot.action('LIST_AND_STATUS', async (ctx) => {
+    if (ctx.from.id !== DEVELOPER_CHAT_ID) return ctx.answerCbQuery('❌ غير مسموح لك.');
+    try { await ctx.answerCbQuery(); } catch {}
+    await showListAndStatus(ctx);
 });
 
 // حذف مستخدم نهائياً من قبل المطور
@@ -471,7 +515,10 @@ bot.action(/^DEV_DEL_USER_(\d+)$/, async (ctx) => {
         delete db.users[targetId];
         await saveDB(db);
         await ctx.answerCbQuery('✅ تم حذف المستخدم وبياناته بنجاح.');
-        return bot.handleAction(ctx, 'LIST_AND_STATUS'); // تحديث القائمة
+        // إعادة عرض القائمة بعد الحذف مباشرة (bot.handleAction غير موجود في Telegraf)
+        return showListAndStatus(ctx);
+    } else {
+        await ctx.answerCbQuery('❌ المستخدم غير موجود أو تم حذفه مسبقاً.');
     }
 });
 
