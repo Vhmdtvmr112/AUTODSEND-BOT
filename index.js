@@ -20,10 +20,10 @@ const REQUIRED_CHANNELS = [
         url:      'https://t.me/SUPER_VEX',
         name:     'سوبَر ڤِيگس ⚡ 𝐒𝐔𝐏𝐄𝐑 𝐕𝐄𝐗'
     },
-    {
-        username: 'M_O_D_YLM',   // بدون @
-        url:      'https://t.me/M_O_D_YLM',
-        name:     'منظمه سحب داتا L.M'
+    //{
+       //username: 'M_O_D_YLM',   // بدون @
+       //url:      'https://t.me/M_O_D_YLM',
+        //name:     'منظمه سحب داتا L.M'
     }
 ]
 
