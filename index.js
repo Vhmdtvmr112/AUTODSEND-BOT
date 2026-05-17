@@ -20,11 +20,16 @@ const REQUIRED_CHANNELS = [
         url:      'https://t.me/SUPER_VEX',
         name:     'سوبَر ڤِيگس ⚡ 𝐒𝐔𝐏𝐄𝐑 𝐕𝐄𝐗'
     },
-    //{
-       //username: 'M_O_D_YLM',   // بدون @
-       //url:      'https://t.me/M_O_D_YLM',
-        //name:     'منظمه سحب داتا L.M'
-    }
+
+    /* 
+    // عشان تضيف قناة تانية شيل /* و */ من هنا
+    {
+       username: 'M_O_D_YLM',   // بدون @
+       url:      'https://t.me/M_O_D_YLM',
+       name:     'منظمه سحب داتا L.M'
+    },
+    // كر نفس الشكل ده لو عايز تضيف قناة 3 و 4 وهكذا
+    */
 ]
 
 const activeSessions  = new Map()
